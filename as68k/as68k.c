@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -96,7 +97,7 @@ void error (const char *format, ...)
 	
 	fclose (fout);
 	remove ("aout.prg");
-	exit (0);
+	exit (-1);
 }
 
 void bug_error (const char *format, ...)
@@ -172,12 +173,16 @@ static inline int get_size (int ch)
 	}
 }
 
+bool is_label_start(char c) {
+	return isalpha(c) || c == '_';
+}
+
 char *rd_label (char *buf, char *lab_buf)
 {
 	char snipped;
 	char *pos = buf;
 	
-	if (!isalpha (*buf)) error ("Label expected.");
+	if (!isalpha (*buf) && buf[0]!='_') error ("Label expected.");
 	/* label */
 	do {
 		pos++;
@@ -231,7 +236,7 @@ char *get_imm (char *buf, struct ImmVal *imm, int flags)
 		if (sscanf (&buf[0], "%d", &imm->val) != 1) goto err;
 		if (*buf == '-') buf++;
 		while (isdigit (*buf)) buf++;
-	} else if (isalpha (*buf)) {
+	} else if (is_label_start(*buf)) {
 		/* label */
 		buf = rd_label (buf, imm->label);
 		lab = get_label (imm->label);
@@ -244,6 +249,11 @@ char *get_imm (char *buf, struct ImmVal *imm, int flags)
 		}
 		if ((flags & F_NOLABELS) && (imm->has_label)) {
 			error ("Label not allowed.");
+		}
+		if (*buf == '+') {
+			buf++;
+			if (sscanf (&buf[0], "%d", &imm->val) != 1) goto err;
+			while (isdigit (*buf)) buf++;
 		}
 	} else {
 		goto err;
@@ -303,7 +313,7 @@ void wr_ea (ea_t *ea)
 		/* PC + offset */
 		else if (ea->reg == 2) {
 			if (ea->imm.has_label) goto rel_lab16;
-			error ("Absolute value not allowed.");
+			wr_short(ea->imm.val);
 			return;
 		}
 		/* PC + INDEX + OFFSET */
@@ -639,6 +649,13 @@ static char *do_dcx_labelled (char *pos, int size, struct ImmVal *imm)
 
 		rel_to = l->val;
 	}
+	/*
+	if (*pos == '+') {
+		/* form: LABEL1 + n */
+		//pos++;
+		//int offset;
+		//if (sscanf (pos, "%d", &offset) != 1) error ("Error. Failed to read LABEL+offset.");
+
 
 	switch (size) {
 		case BYTE:
@@ -700,7 +717,7 @@ int asm_pass1 (const char *bin_filename)
 			check_whitespace ();
 			if (*pos == '\0') continue;
 		}
-		else if (isalpha (*pos)) {
+		else if (is_label_start (*pos)) {
 			equ_lab = pos;
 			pos = rd_label (pos, lab1);
 			if (*pos == ':') {
@@ -726,8 +743,16 @@ int asm_pass1 (const char *bin_filename)
 			pos += 3;
 			check_whitespace();
 			if (!equ_lab) error ("EQU without label.");
-			pos = get_imm (pos, &imm, F_NOLABELS);
-			add_label (lab1, L_CONST, imm.val);
+			pos = get_imm (pos, &imm, 0);
+			if (imm.has_label) {
+				struct Label *l = get_label (imm.label);
+				if (!l) {
+					error("equ with label must come after label definition");
+				}
+				add_label (lab1, L_ADDR, imm.val + l->val);
+			} else {
+				add_label (lab1, L_CONST, imm.val);
+			}
 			coutput_label = 0;
 			continue;
 		}
@@ -762,7 +787,7 @@ int asm_pass1 (const char *bin_filename)
 				}
 				pos++;
 			}
-			while (isdigit (*pos) || isalpha (*pos) || (*pos == '$')) {
+			while (isdigit (*pos) || isalpha (*pos) || (*pos == '_') || (*pos == '$')) {
 				pos = get_imm (pos, &imm, 0);
 				if (imm.has_label) {
 					pos = do_dcx_labelled (pos, size, &imm);
@@ -999,7 +1024,7 @@ int asm_pass1 (const char *bin_filename)
 			} else if (size == WORD) {
 				wr_short (ea2.imm.val);
 			} else {
-				wr_int (ea2.imm.val);
+				wr_ea(&ea2);
 			}
 			wr_ea (&ea);
 			
@@ -1610,7 +1635,7 @@ skip:
 			size = get_size (*pos);
 			pos++;
 			check_whitespace();
-			pos = get_imm (pos, &imm, F_NOLABELS | F_IMM);
+			pos = get_imm (pos, &imm, F_IMM);
 			check_range (&imm.val, size);
 			check (',');
 			pos = get_ea (pos, &ea, size, F_NOIMM_NOPC_NOAREG);
@@ -1625,7 +1650,12 @@ skip:
 			} else if (size == WORD) {
 				wr_short (imm.val);
 			} else {
-				wr_int (imm.val);
+				if (imm.has_label) {
+					wr_int(0);
+					add_fixup(get_bitpos()-4, LONG_FIXUP, imm.label);
+				} else {
+					wr_int (imm.val);
+				}
 			}
 			wr_ea (&ea);
 			
@@ -2205,6 +2235,7 @@ int asm_pass2 (int fixup_pos)
 			wr_short (dist);
 		} else if (fix->size >= LONG) {
 			num_relocs++;
+			//fprintf(stderr, "Reloc 0x%x\n", fix->adr);
 			wr_int (lab->val);
 			set_bitpos (fixup_pos);
 			if (_first) {
@@ -2262,7 +2293,7 @@ int main (int argc, char **argv)
 	src_filename = argv[arg];
 	if ((fin = fopen (src_filename, "r"))==NULL) {
 		printf ("Error. Cannot open %s.\n", src_filename);
-		exit (0);
+		exit (-1);
 	}
 
 	snprintf (bin_filename, sizeof (bin_filename), "%s.bin", src_filename);

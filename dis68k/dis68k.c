@@ -1,16 +1,19 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
 
-static int end;
-static int base = 0x1c;
+static const bool LABEL_EVERY_LINE = true;
+
+static int32_t end;
+const int32_t BASE = 0x1c;
 static unsigned char *buffer;
 static int buf_pos = 0;
 static unsigned short *labels;
 static int pass = 1;
-static unsigned char *probs;
 static enum GUESSMODE {
 	GUESS_NONE,
 	GUESS_SIMPLE,
@@ -19,6 +22,19 @@ static enum GUESSMODE {
 
 static int walk_stack[1024];
 static int *ws_top = &walk_stack[0];
+
+struct header_t {
+	uint16_t ph_branch;
+	uint32_t ph_tlen; // text
+	uint32_t ph_dlen; // data
+	uint32_t ph_blen; // bss
+	uint32_t ph_slen;
+	uint32_t ph_res1;
+	uint32_t ph_prgflags;
+	uint16_t ph_absflag;
+};
+
+static struct header_t header;
 
 #define PUSH_WS(pos)	do { ws_top++; *ws_top = (pos); } while (0);
 #define POP_WS()	(*(ws_top--))
@@ -35,6 +51,10 @@ static int *ws_top = &walk_stack[0];
 #define F_LABEL_TABLE32	(1<<8)
 #define F_LABEL_MAJOR	(1<<9)
 
+static bool in_range(int adr) {
+	return adr >= BASE && adr < end;
+}
+
 static void output (const char *format, ...)
 {
 	va_list argptr;
@@ -47,7 +67,7 @@ static void output (const char *format, ...)
 
 static void output_lab (int adr)
 {
-	if (labels[adr] & F_LABEL_MAJOR) output ("L%x", adr);
+	if (in_range(adr) && (labels[adr] & F_LABEL_MAJOR)) output ("L%x", adr);
 	else output ("l%x", adr);
 }
 
@@ -56,7 +76,7 @@ unsigned char rd_byte(void)
 	return buffer[buf_pos++];
 }
 
-short rd_short(void)
+int16_t rd_short(void)
 {
 	short t1, t2;
 	t1 = rd_byte();
@@ -358,13 +378,19 @@ uint put_adrmod (int mode, int reg, int op_size)
 						output ("#???");
 					}
 					break;
-				case 2:
-					temp = buf_pos;
-					temp += rd_short ();
-					labels [temp] |= F_LABEL | F_LABEL_MAJOR;
-					output_lab (temp);
-					output ("(pc)");
+				case 2: {
+					int16_t offset = rd_short();
+					temp = buf_pos-2;
+					temp += offset;
+					if (temp > 0 && temp < end) {
+						labels [temp] |= F_LABEL | F_LABEL_MAJOR;
+						output_lab (temp);
+						output ("(pc)");
+					} else {
+						output ("%d(pc)", offset);
+					}
 					return temp;
+					}
 				case 3: temp = buf_pos;
 					ext.code = rd_short ();
 					if (ext.adr_index.zeros != 0) output ("???");
@@ -482,11 +508,15 @@ void put_imm (int size)
 	} else if (size == 1) {
 		output ("#$%hx", (int)rd_short ());
 	} else {
-		output ("#$%x", (int)rd_int ());
+		if (labels[buf_pos] & F_USELAB) {
+			output("#");
+			output_lab (rd_int ());
+		}
+		else output ("#$%x", (int)rd_int ());
 	}
 }
 
-#define is_valid_branch(dest)	(((dest) >= base) && ((dest < end)))
+#define is_valid_branch(dest)	(((dest) >= BASE) && ((dest < end)))
 
 static void dump_code ()
 {
@@ -499,6 +529,8 @@ static void dump_code ()
 
 	//output ("\topt\te-\r\n");
 	
+	buf_pos = POP_WS();
+	
 	while (buf_pos < end) {
 		if ((guessmode == GUESS_WALK) && (pass == 1)) {
 			if (labels[buf_pos] & (F_WALKED_CODE | F_CODE_STOP)) {
@@ -506,8 +538,7 @@ static void dump_code ()
 				continue;
 			}
 		}
-		if (labels[buf_pos] & F_LABEL) {
-			if (guessmode == GUESS_SIMPLE) output ("\r\n* data guess rate %d", probs[buf_pos]);
+		if ((labels[buf_pos] & F_LABEL) || LABEL_EVERY_LINE) {
 			if (labels[buf_pos] & F_LABEL_MAJOR) {
 				output ("\r\n\r\n");
 				output_lab (buf_pos);
@@ -526,7 +557,7 @@ static void dump_code ()
 			temp = rd_int ();
 			output ("dc.l\t");
 			output_lab (temp);
-			if (!(labels[temp] & F_LABEL)) fprintf (stderr, "Error, Label table entry at 0x%x isn't a label address.\n", buf_pos-4);
+			if (in_range(temp) && !(labels[temp] & F_LABEL)) fprintf (stderr, "Error, Label table entry at 0x%x isn't a label address.\n", buf_pos-4);
 			continue;
 		}
 		if (labels[buf_pos] & F_LABEL_TABLE16) {
@@ -561,6 +592,7 @@ static void dump_code ()
 			while (rd_byte () == 0) {
 				temp++;
 				if (labels[buf_pos] & F_LABEL) break;
+				if (labels[buf_pos] & F_USELAB) break;
 				else if (labels[buf_pos] & F_WALKED_CODE) break;
 				else if (!(labels[buf_pos] & F_GUESS_DATA)) break;
 				else if (labels[buf_pos] & F_GUESS_STRING) break;
@@ -573,11 +605,18 @@ static void dump_code ()
 				continue;
 			}
 			buf_pos = last_ip;
+
+			if (labels[buf_pos] & F_USELAB) {
+				output("dc.l ");
+				output_lab (rd_int());
+				continue;
+			}
 			output ("dc.b\t");
 			for (temp = 0; temp<16; temp++) {
 				if (temp) output (",");
 				output ("$%x", rd_byte ());
 				if (labels[buf_pos] & F_LABEL) break;
+				if (labels[buf_pos] & F_USELAB) break;
 				else if (labels[buf_pos] & F_WALKED_CODE) break;
 				else if (!(labels[buf_pos] & F_GUESS_DATA)) break;
 				else if (labels[buf_pos] & F_GUESS_STRING) break;
@@ -1166,9 +1205,11 @@ static void dump_code ()
 		while ((op.code & 0xfff0) == 0x4e60) {
 			if (op.addx.rm) {
 				/* USP to Ax */
-				output ("move.l\tusp,a%d", op.addx.src_reg);
+				fprintf(stderr, "Warning: outputting move.l usp,a%d as nop!!!\n", op.addx.src_reg);
+				output ("nop");
 			} else {
-				output ("move.l\ta%d,usp", op.addx.src_reg);
+				fprintf(stderr, "Warning: outputting move.l a%d,usp as nop!!!\n", op.addx.src_reg);
+				output ("nop");
 			}
 			goto done;
 		}
@@ -1356,6 +1397,30 @@ done:
 		}
 		continue;
 	}
+	// output BSS
+	while (buf_pos < end + header.ph_blen) {
+		if (labels[buf_pos] & F_LABEL) {
+			if (labels[buf_pos] & F_LABEL_MAJOR) {
+				output ("\r\n\r\n");
+				output_lab (buf_pos);
+				output (":\r\n\t\t");
+			} else {
+				output ("\r\n\t");
+				output_lab (buf_pos);
+				output (":\t");
+			}
+		} else {
+			//output ("\r\n_%x:\t\t", buf_pos);
+			output ("\r\n\t\t");
+		}
+		int size = 0;
+		do {
+			size++;
+			buf_pos++;
+			if (labels[buf_pos] & F_LABEL) break;
+		} while (buf_pos < end + header.ph_blen);
+		output("ds.b %d", size);
+	}
 	output ("\r\n");
 }
 
@@ -1363,20 +1428,20 @@ done:
  * Pass 0 as reloc for first fixup address, otherwise
  * pass returned valu. if returned value == 0 you are at the end, man.
  */
-int get_fixup (int reloc)
+int32_t get_fixup (int32_t reloc)
 {
-	int old_bufpos;
-	int next;
-	static int reloc_pos;
+	int32_t old_bufpos;
+	int32_t next;
+	static int32_t reloc_pos;
 
 	old_bufpos = buf_pos;
 	if (reloc == 0) {
-		buf_pos = end;
+		buf_pos = BASE + header.ph_tlen + header.ph_dlen + header.ph_slen;
 		reloc = rd_int ();
 		reloc_pos = buf_pos;
 		buf_pos = old_bufpos;
 		if (reloc == 0) return 0;
-		else return base + reloc;
+		else return (BASE + reloc) & 0x7fffff;
 	} else {
 		buf_pos = reloc_pos;
 again:
@@ -1392,28 +1457,35 @@ again:
 		else reloc += next;
 		reloc_pos = buf_pos;
 		buf_pos = old_bufpos;
-		return reloc;
+		return reloc & 0x7fffff;
 	}
 }
 
 void do_fixups ()
 {
+	int num_fixups = 0;
 	int reloc, next;
 	int pos;
+
+	if ((header.ph_absflag & 0x1) != 0) {
+		fprintf(stderr, "No relocations (ph_absflag=0x%x)\n", header.ph_absflag);
+		return;
+	}
 
 	reloc = get_fixup (0);
 	fprintf (stderr, "relocs: ");
 	while (reloc) {
-		fprintf (stderr, "0x%x ", reloc);
+		num_fixups++;
+		//fprintf (stderr, "Reloc 0x%x\n", reloc);
 		pos = buf_pos;
 		/* address to be modified */
 		buf_pos = reloc;
 		labels [buf_pos] |= F_USELAB;
 		next = rd_int ();
-		next += base;
+		next += BASE;
 		buf_pos -= 4;
 		wr_int (next);
-		if (next > end) {
+		if (next > end + header.ph_blen) {
 			printf ("Reloc label 0x%x out of range...\n", next);
 		} else {
 			labels [next] |= F_LABEL | F_LABEL_MAJOR;
@@ -1422,7 +1494,7 @@ void do_fixups ()
 
 		reloc = get_fixup (reloc);
 	}
-	fprintf (stderr, "\n");
+	fprintf (stderr, "\n%d fixups.\n", num_fixups);
 }
 
 void guess_datasegs ()
@@ -1432,85 +1504,15 @@ void guess_datasegs ()
 	int pos, sec_start, num_dunno, prop;
 
 	if (guessmode == GUESS_WALK) {
-#if 0
-		/* 0x4e75 (rts) with label infront is often a function */
-		for (next = end-3; next >= base; next--) {
-			buf_pos = next;
-			/* rts */
-			if (rd_short () == 0x4e75) {
-				/* label after */
-				if (!(labels[buf_pos] & F_LABEL)) continue;
-				/* zoom to label before this rts */
-				for (; next >= base; next--) {
-					if (labels[next] & F_LABEL) break;
-					if (labels[next] & F_WALKED_CODE) break;
-				}
-				PUSH_WS (end);
-				buf_pos = next;
-				dump_code ();
-			}
-		}
-		/* fixup sections ending in 0x4e75 (rts) are probably functions
-		 * not data */
-		reloc = get_fixup (0);
-		while (reloc) {
-			/* scan to first label and see if the previous word is
-			 * an rts */
-			for (next = reloc; next < end; next++) {
-				if (labels[next] & F_LABEL) break;
-			}
-			buf_pos = next-2;
-			if (rd_short() == 0x4e75) {
-				/* grope section as code (find start label) */
-				for (next = reloc; next >= base; next--) {
-					if (labels[next] & F_LABEL) break;
-				}
-				PUSH_WS (end);
-				buf_pos = next;
-				dump_code ();
-			}
-			reloc = get_fixup (reloc);
-		}
-#endif /* 0 */
 		/* turn everything not F_WALKED_CODE into F_GUESS_DATA */
-		for (pos=base; pos<end; pos++) {
+		for (pos=BASE; pos<end; pos++) {
 			if (!(labels[pos] & F_WALKED_CODE)) {
 				labels[pos] |= F_GUESS_DATA;
 			}
 		}
-		goto skip_simple;
 	}
-	/* if there is a good proportion of F_DUNNOs (unknown opcodes) between
-	 * 2 labels then the entire section is probably data */
-	pos=base;
-	sec_start=base;
-	num_dunno=0;
-	for (;; pos++) {
-		if ((labels [pos] & F_LABEL) || (pos == end)) {
-			/* new section */
-			if (pos != base) {
-				dist = pos - sec_start;
-				/* proportion of dunnos */
-				prop = (100*num_dunno)/dist;
-				probs[sec_start] = prop;
-				//printf ("Section prop %d%% (pos 0x%x to 0x%x)\n", prop, sec_start, pos-1);
-				if (prop > 0) {
-					while (sec_start < pos) {
-						labels [sec_start++] |= F_GUESS_DATA;
-					}
-				}
-			}
-			sec_start = pos;
-			num_dunno = 0;
-		}
-		if (pos >= end) break;
-		if (labels [pos] & F_DUNNO) {
-			num_dunno++;
-		}
-	}
-skip_simple:
 	/* grope for possible text areas */
-	for (pos=base, dist=0; pos<end; pos++) {
+	for (pos=BASE, dist=0; pos<end; pos++) {
 		buf_pos = pos;
 		next = rd_byte ();
 		/* labels break runs of ascii characters */
@@ -1553,7 +1555,7 @@ int main (int argc, char **argv)
 		exit (0);
 	}
 
-	if ((fptr = fopen (argv[argc-1], "r"))==NULL) {
+	if ((fptr = fopen (argv[argc-1], "rb"))==NULL) {
 		fprintf (stderr, "Could not open %s.\n", argv[argc-1]);
 		exit (0);
 	}
@@ -1564,18 +1566,40 @@ int main (int argc, char **argv)
 	fread (buffer, 1, end, fptr);
 	fclose (fptr);
 
-	buf_pos = 2;
-	end = base + rd_int ();
-	
-	labels = malloc (end*sizeof (short));
-	memset (labels, 0, end*sizeof (short));
+	memcpy(&header, buffer, sizeof(struct header_t));
 
-	guessmode = GUESS_NONE;
+	buf_pos = 0;
+	header.ph_branch = rd_short();
+	header.ph_tlen = rd_int();
+	header.ph_dlen = rd_int();
+	header.ph_blen = rd_int();
+	header.ph_slen = rd_int();
+	header.ph_res1 = rd_int();
+	header.ph_prgflags = rd_int();
+	header.ph_absflag = rd_short();
+
+	fprintf(stderr, "ph_branch: 0x%hx\n", header.ph_branch);
+	fprintf(stderr, "ph_tlen: 0x%x\n", header.ph_tlen);
+	fprintf(stderr, "ph_dlen: 0x%x\n", header.ph_dlen);
+	fprintf(stderr, "ph_blen: 0x%x\n", header.ph_blen);
+	fprintf(stderr, "ph_slen: 0x%x\n", header.ph_slen);
+	fprintf(stderr, "ph_res1: 0x%x\n", header.ph_res1);
+	fprintf(stderr, "ph_prgflags: 0x%x\n", header.ph_prgflags);
+	fprintf(stderr, "ph_absflag: 0x%hx\n", header.ph_absflag);
+
+	end = BASE + header.ph_tlen + header.ph_dlen;// + header.ph_slen;
+	buf_pos = 6;
+	
+	labels = malloc ((end+header.ph_blen)*sizeof (short));
+	memset (labels, 0, (end+header.ph_blen)*sizeof (short));
+
+	guessmode = GUESS_WALK;
 	if (argc > 2) {
 		if (strcmp (argv[1], "-gs")==0) guessmode = GUESS_SIMPLE;
 		else if (strcmp (argv[1], "-gw")==0) {
 			guessmode = GUESS_WALK;
 			PUSH_WS (end);
+			PUSH_WS (BASE);
 			i = 2;
 			if (strcmp (argv[i], "-codestart")==0) {
 				for (i+=1; i<argc-1; i++) {
@@ -1661,19 +1685,19 @@ int main (int argc, char **argv)
 		}
 	}
 
-	probs = malloc (end);
-	memset (probs, 0, end);
 	do_fixups ();
 
-	buf_pos = base;
+	buf_pos = BASE;
 	dump_code ();
 	
 	if (guessmode) guess_datasegs ();
 	pass = 2;
 
 	PUSH_WS (end);
-	buf_pos = base;
+	PUSH_WS (BASE);
+	buf_pos = BASE;
 	dump_code ();
+
 	return 0;
 }
 

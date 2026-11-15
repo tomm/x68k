@@ -1,6 +1,6 @@
 
 OBJS = dis68k.o
-CFLAGS = -Wall -O2
+CFLAGS = -Wall -O0 -g
 
 .c.o:
 	$(CC) $(CFLAGS) -c $<
