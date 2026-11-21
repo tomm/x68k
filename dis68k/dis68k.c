@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-static const bool LABEL_EVERY_LINE = true;
+static const bool LABEL_EVERY_LINE = false;
 
 static int32_t end;
 const int32_t BASE = 0x1c;
@@ -67,8 +67,8 @@ static void output (const char *format, ...)
 
 static void output_lab (int adr)
 {
-	if (in_range(adr) && (labels[adr] & F_LABEL_MAJOR)) output ("L%x", adr);
-	else output ("l%x", adr);
+	if (in_range(adr) && (labels[adr] & F_LABEL_MAJOR)) output ("L%x", adr - BASE);
+	else output ("l%x", adr - BASE);
 }
 
 unsigned char rd_byte(void)
@@ -1205,11 +1205,9 @@ static void dump_code ()
 		while ((op.code & 0xfff0) == 0x4e60) {
 			if (op.addx.rm) {
 				/* USP to Ax */
-				fprintf(stderr, "Warning: outputting move.l usp,a%d as nop!!!\n", op.addx.src_reg);
-				output ("nop");
+				output ("move.l\tusp,a%d", op.addx.src_reg);
 			} else {
-				fprintf(stderr, "Warning: outputting move.l a%d,usp as nop!!!\n", op.addx.src_reg);
-				output ("nop");
+				output ("move.l\ta%d,usp", op.addx.src_reg);
 			}
 			goto done;
 		}
@@ -1618,16 +1616,16 @@ int main (int argc, char **argv)
 					//if (from == 0) break;
 					//PUSH_WS (from);
 					//fprintf (stderr, "Code start 0x%x\n", pos);
-					for (j=from; j<=to; j+=inc) {
-							buf_pos = j;
-
-							PUSH_WS (j);
+					for (j=from + BASE; j<=to + BASE; j+=inc) {
+						labels[j] |= F_LABEL | F_LABEL_MAJOR;
+						buf_pos = j;
+						PUSH_WS (j);
 					}
 				}
 			}
 			if (strcmp (argv[i], "-codestop")==0) {
 				for (i+=1; i<argc-1; i++) {
-					pos = strtol (argv[i], NULL, 0);
+					pos = strtol (argv[i], NULL, 0) + BASE;
 					if (pos == 0) break;
 					labels[pos] |= F_CODE_STOP;
 					fprintf (stderr, "Code stop 0x%x\n", pos);
@@ -1638,6 +1636,8 @@ int main (int argc, char **argv)
 					if (sscanf (argv[i], "%x,%x", &from, &to) != 2) {
 						break;
 					} else {
+						from += BASE;
+						to += BASE;
 						fprintf (stderr, "Labeltable_abs32 0x%x to 0x%x\n", from, to);
 						for (; from <= to; from++) {
 							labels[from] |= F_LABEL_TABLE32;
@@ -1651,6 +1651,9 @@ int main (int argc, char **argv)
 						fprintf (stderr, "Malformed -labeltab address.\n");
 						break;
 					} else {
+						from += BASE;
+						to += BASE;
+
 						fprintf (stderr, "Labeltable_rel16 0x%x to 0x%x\n", from, to);
 						labels[from] |= F_LABEL | F_LABEL_MAJOR;
 						for (j=from; j <= to; j+=2) {
@@ -1670,6 +1673,8 @@ int main (int argc, char **argv)
 						fprintf (stderr, "Malformed -labeltab address.\n");
 						break;
 					} else {
+						from += BASE;
+						to += BASE;
 						fprintf (stderr, "Labeltable_rel16 0x%x to 0x%x\n", from, to);
 						labels[from] |= F_LABEL | F_LABEL_MAJOR;
 						for (j=from; j <= to; j+=2) {

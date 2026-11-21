@@ -8,9 +8,6 @@
 #include <stdarg.h>
 #include "dict.h"
 #include "as68k.h"
-#include "output.h"
-
-struct Compiler *comp;
 
 FILE *fin;
 FILE *fout;
@@ -20,7 +17,6 @@ Dict labels;
 int dump_labels = 0;
 int line_no = 0;
 int last_op_addr;
-int output_c = 0;
 
 const char *src_filename;
 
@@ -264,10 +260,17 @@ err:
 	return NULL;
 }
 
+// ignores comments
+bool is_eol(const char *pos)
+{
+	while (isspace (*pos)) pos++;
+	if (*pos && *pos != '*' && *pos != ';') return false;
+	return true;
+}
+
 void check_end (const char *buf)
 {
-	while (isspace (*buf)) buf++;
-	if (*buf) error ("Garbage at end of line.");
+	if (!is_eol(buf)) error ("Garbage at end of line.");
 }
 
 void wr_ea (ea_t *ea)
@@ -437,7 +440,7 @@ poopdog:
 			return pos;
 		}
 		while (isspace (*pos)) pos++;
-		if (((*pos == ',') || (*pos == '\0')) && (flags & F_MEM_L)) {
+		if (((*pos == ',') || is_eol(pos)) && (flags & F_MEM_L)) {
 			/* Immed memory with label */
 			ea->mode = 0x7;
 			ea->reg = 1;
@@ -622,12 +625,6 @@ mess:
 	last_op_addr += 2;
 	wr_ea (&ea);
 
-	if (output_c) {
-		/* register mask in ea2->reg */
-		ea2.reg = hi;
-		comp->push_op2 (OP_MOVEM, &ea, &ea2, size, op.code);
-	}
-	
 	return pos;
 err:
 	error ("your movem is all wanked up.");
@@ -697,8 +694,6 @@ int asm_pass1 (const char *bin_filename)
 
 	dict_init (&labels);
 	
-	if (output_c) comp->begin (src_filename, bin_filename);
-	
 	while (fgets (buf, sizeof (buf), fin)) {
 		last_op_addr = get_bitpos ();
 		line_no++;
@@ -708,6 +703,7 @@ int asm_pass1 (const char *bin_filename)
 		while (isspace (*pos)) pos++;
 		if (*pos == '\0') continue;
 		if (*pos == '*') continue;
+		if (*pos == ';') continue;
 		if (*pos == ':') {
 			/* empty label (":	moveq...") signifies a valid
 			 * computed jump target without a defined label.
@@ -715,7 +711,7 @@ int asm_pass1 (const char *bin_filename)
 			coutput_label = 1;
 			pos++;
 			check_whitespace ();
-			if (*pos == '\0') continue;
+			if (is_eol(pos)) continue;
 		}
 		else if (is_label_start (*pos)) {
 			equ_lab = pos;
@@ -726,14 +722,11 @@ int asm_pass1 (const char *bin_filename)
 				if (dump_labels) {
 					fprintf (stderr, "0x%x: %s\n", get_bitpos () - BASE, lab1);
 				}
-				if (output_c) {
-					comp->label (lab1);
-				}
 				coutput_label = 1;
 				equ_lab = NULL;
 				pos++;
 				check_whitespace ();
-				if (*pos == '\0') continue;
+				if (is_eol(pos)) continue;
 			}
 			while (isspace (*pos)) pos++;
 		}
@@ -821,9 +814,6 @@ int asm_pass1 (const char *bin_filename)
 			continue;	
 		}
 		
-		if (output_c) {
-			comp->addr_label (coutput_label);
-		}
 		coutput_label = 0;
 
 		/* odd address checking */
@@ -851,26 +841,6 @@ int asm_pass1 (const char *bin_filename)
 			wr_short (op.code);
 			wr_ea (&ea);
 
-			if (output_c) {
-				ea.op_size = size;
-				ea2.op_size = size;
-				ea_set_immediate (&ea2, imm.val);
-				
-				if (ea.mode == 1) {
-					/* to areg is special: no condition codes set */
-					if (op.addq.issub) {
-						comp->push_op (OP_SUBA, &ea2, &ea, size);
-					} else {
-						comp->push_op (OP_ADDA, &ea2, &ea, size);
-					}
-				} else {
-					if (op.addq.issub) {
-						comp->push_op (OP_SUB, &ea2, &ea, size);
-					} else {
-						comp->push_op (OP_ADD, &ea2, &ea, size);
-					}
-				}
-			}
 			continue;
 		}
 		/* NOP */
@@ -896,9 +866,6 @@ int asm_pass1 (const char *bin_filename)
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				comp->push_op (OP_NOT, &ea, NULL, size);
-			}
 			continue;
 		}
 		if (strncmp (pos, "negx", 4) == 0) {
@@ -916,9 +883,6 @@ int asm_pass1 (const char *bin_filename)
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				comp->push_op (OP_NEGX, &ea, NULL, size);
-			}
 			continue;
 		}
 		if (strncmp (pos, "neg", 3) == 0) {
@@ -936,9 +900,6 @@ int asm_pass1 (const char *bin_filename)
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				comp->push_op (OP_NEG, &ea, NULL, size);
-			}
 			continue;
 		}
 		/* DIVS/DIVU */
@@ -960,13 +921,6 @@ int asm_pass1 (const char *bin_filename)
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				if (_signed) {
-					comp->push_op (OP_DIVS, &ea, &ea2, WORD);
-				} else {
-					comp->push_op (OP_DIVU, &ea, &ea2, WORD);
-				}
-			}
 			continue;
 		}
 		/* MULS/MULU */
@@ -987,13 +941,6 @@ int asm_pass1 (const char *bin_filename)
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				if (_signed) {
-					comp->push_op (OP_MULS, &ea, &ea2, WORD);
-				} else {
-					comp->push_op (OP_MULU, &ea, &ea2, WORD);
-				}
-			}
 			continue;
 		}
 		/* ADDI/SUBI */
@@ -1028,14 +975,6 @@ int asm_pass1 (const char *bin_filename)
 			}
 			wr_ea (&ea);
 			
-			if (output_c) {
-				if (sub) {
-					comp->push_op (OP_SUB, &ea2, &ea, size);
-				} else {
-					comp->push_op (OP_ADD, &ea2, &ea, size);
-				}
-			}
-			
 			continue;
 		}
 		/* ADDA/SUBA */
@@ -1061,13 +1000,6 @@ int asm_pass1 (const char *bin_filename)
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				if (is_sub) {
-					comp->push_op (OP_SUBA, &ea, &ea2, size);
-				} else {
-					comp->push_op (OP_ADDA, &ea, &ea2, size);
-				}
-			}
 			continue;
 		}
 		/* ADDX/SUBX */
@@ -1093,12 +1025,6 @@ int asm_pass1 (const char *bin_filename)
 				op.addx.dest_reg = i;
 				wr_short (op.code);
 
-				if (output_c) {
-					ea2.mode = 0; ea2.reg = i; ea2.op_size = size;
-				
-					if (_type == 'a') comp->push_op (OP_ADDX, &ea, &ea2, size);
-					else comp->push_op (OP_SUBX, &ea, &ea2, size);
-				}
 			} else {
 				/* -(An),-(An) mode */
 				check (',');
@@ -1108,10 +1034,6 @@ int asm_pass1 (const char *bin_filename)
 				op.addx.dest_reg = ea2.reg;
 				wr_short (op.code);
 
-				if (output_c) {
-					if (_type == 'a') comp->push_op (OP_ADDX, &ea, &ea2, size);
-					else comp->push_op (OP_SUBX, &ea, &ea2, size);
-				}
 			}
 			check_end (pos);
 			continue;
@@ -1153,16 +1075,6 @@ int asm_pass1 (const char *bin_filename)
 			}
 			check_end (pos);
 			
-			if (output_c) {
-				ea.op_size = size;
-				ea2.op_size = size;
-				
-				if (sub) {
-					comp->push_op (OP_SUB, &ea, &ea2, size);
-				} else {
-					comp->push_op (OP_ADD, &ea, &ea2, size);
-				}
-			}
 			continue;
 		}
 		/* BCHG/BCLR/BSET/BTST */
@@ -1223,25 +1135,6 @@ int asm_pass1 (const char *bin_filename)
 			}
 			check_end (pos);
 
-			if (output_c) {
-				if (ea2.mode == 0) {
-					size = LONG;
-				} else {
-					size = BYTE;
-				}
-				ea2.op_size = ea.op_size = size;
-				switch (type) {
-					/* bchg */
-					case 0: comp->push_op (OP_BCHG, &ea, &ea2, size); break;
-					/* bclr */
-					case 1: comp->push_op (OP_BCLR, &ea, &ea2, size); break;
-					/* bset */
-					case 2: comp->push_op (OP_BSET, &ea, &ea2, size); break;
-					/* btst */
-					default: case 3:
-						comp->push_op (OP_BTST, &ea, &ea2, size); break;
-				}
-			}
 			continue;
 		}
 		/* ASx/LSx/ROx ROXx */
@@ -1287,27 +1180,6 @@ int asm_pass1 (const char *bin_filename)
 				op.ASx.reg = reg;
 				wr_short (op.code);
 			
-				if (output_c) {
-					ea.op_size = size;
-					ea2.op_size = size;
-					ea2.mode = 0; ea2.reg = reg;
-					
-					if (type == 0) {
-						if (dir) comp->push_op (OP_ASL, &ea, &ea2, size);
-						else comp->push_op (OP_ASR, &ea, &ea2, size);
-					} else if (type == 1) {
-						if (dir) comp->push_op (OP_LSL, &ea, &ea2, size);
-						else comp->push_op (OP_LSR, &ea, &ea2, size);
-					} else if (type == 2) {
-						if (dir) comp->push_op (OP_ROXL, &ea, &ea2, size);
-						else comp->push_op (OP_ROXR, &ea, &ea2, size);
-					} else if (type == 3) {
-						if (dir) comp->push_op (OP_ROL, &ea, &ea2, size);
-						else comp->push_op (OP_ROR, &ea, &ea2, size);
-					} else {
-						error ("C code not generated (work unfinished).");
-					}
-				}
 				continue;
 			} else if ((ea.mode == 7) && (ea.reg == 4)) {
 				/* imm,Dn type */
@@ -1326,27 +1198,6 @@ int asm_pass1 (const char *bin_filename)
 				op.ASx.reg = reg;
 				wr_short (op.code);
 			
-				if (output_c) {
-					ea.op_size = size;
-					ea2.op_size = size;
-					ea2.mode = 0; ea2.reg = reg;
-					
-					if (type == 0) {
-						if (dir) comp->push_op (OP_ASL, &ea, &ea2, size);
-						else comp->push_op (OP_ASR, &ea, &ea2, size);
-					} else if (type == 1) {
-						if (dir) comp->push_op (OP_LSL, &ea, &ea2, size);
-						else comp->push_op (OP_LSR, &ea, &ea2, size);
-					} else if (type == 2) {
-						if (dir) comp->push_op (OP_ROXL, &ea, &ea2, size);
-						else comp->push_op (OP_ROXR, &ea, &ea2, size);
-					} else if (type == 3) {
-						if (dir) comp->push_op (OP_ROL, &ea, &ea2, size);
-						else comp->push_op (OP_ROR, &ea, &ea2, size);
-					} else {
-						error ("C code not generated (work unfinished).");
-					}
-				}
 				continue;
 			} else {
 				/* ea mode */
@@ -1362,26 +1213,6 @@ int asm_pass1 (const char *bin_filename)
 				wr_short (op.code);
 				wr_ea (&ea);
 			
-				if (output_c) {
-					ea.op_size = size;
-					ea2.op_size = size;
-					ea_set_immediate (&ea2, 1);
-					if (type == 0) {
-						if (dir) comp->push_op (OP_ASL, &ea2, &ea, size);
-						else comp->push_op (OP_ASR, &ea2, &ea, size);
-					} else if (type == 1) {
-						if (dir) comp->push_op (OP_LSL, &ea2, &ea, size);
-						else comp->push_op (OP_LSR, &ea2, &ea, size);
-					} else if (type == 2) {
-						if (dir) comp->push_op (OP_ROXL, &ea2, &ea, size);
-						else comp->push_op (OP_ROXR, &ea2, &ea, size);
-					} else if (type == 3) {
-						if (dir) comp->push_op (OP_ROL, &ea2, &ea, size);
-						else comp->push_op (OP_ROR, &ea2, &ea, size);
-					} else {
-						error ("C code not generated (work unfinished).");
-					}
-				}
 				continue;
 			}
 			continue;
@@ -1422,18 +1253,6 @@ blork:
 			}
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea2.op_size = size;
-				ea_set_immediate (&ea2, imm.val);
-				
-				if (_type == 'e') {
-					comp->push_op (OP_XOR, &ea2, &ea, size);
-				} else if (_type == 'o') {
-					comp->push_op (OP_OR, &ea2, &ea, size);
-				} else if (_type == 'a') {
-					comp->push_op (OP_AND, &ea2, &ea, size);
-				}
-			}
 			continue;
 		}
 		/* AND/OR */
@@ -1470,12 +1289,6 @@ blork:
 				wr_ea (&ea2);
 			}
 			
-			if (output_c) {
-				if (_type == 'a')
-					comp->push_op (OP_AND, &ea, &ea2, size);
-				else
-					comp->push_op (OP_OR, &ea, &ea2, size);
-			}
 			continue;
 		}
 		/* EOR */
@@ -1497,11 +1310,6 @@ blork:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea2.mode = 0; ea2.reg = reg;
-				ea2.op_size = size;
-				comp->push_op (OP_XOR, &ea2, &ea, size);
-			}
 			continue;
 		}
 		/* SWAP */
@@ -1513,9 +1321,6 @@ blork:
 			check_end (pos);
 			wr_short (op.code);
 			
-			if (output_c) {
-				comp->push_op (OP_SWAP, &ea, NULL, 0);
-			}
 			continue;
 		}
 		/* BSR */
@@ -1537,9 +1342,6 @@ blork:
 				add_fixup (get_bitpos()-2, WORD, ea.imm.label);
 			} else {
 				error ("Invalid size '.%c'.", size);
-			}
-			if (output_c) {
-				comp->push_op (OP_JSR, &ea, NULL, 0);
 			}
 			continue;
 		}
@@ -1567,9 +1369,6 @@ blork:
 				add_fixup (get_bitpos()-2, WORD, ea.imm.label);
 			} else {
 				error ("Invalid size '.%c'.", size);
-			}
-			if (output_c) {
-				comp->push_op2 (OP_BCC, &ea, NULL, 0, op.code);
 			}
 			continue;
 		}
@@ -1600,9 +1399,6 @@ blork:
 			wr_short (0);
 			add_fixup (get_bitpos()-2, WORD, ea2.imm.label);
 			
-			if (output_c) {
-				comp->push_op2 (OP_DBCC, &ea, &ea2, 0, op.code);
-			}
 			continue;
 		}
 skip:
@@ -1622,10 +1418,6 @@ skip:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea.op_size = size;
-				comp->push_op (OP_CLR, &ea, NULL, size);
-			}
 			continue;
 		}
 		/* CMPI */
@@ -1659,13 +1451,6 @@ skip:
 			}
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea.op_size = size;
-				ea2.op_size = size;
-				ea_set_immediate (&ea2, imm.val);
-				
-				comp->push_op (OP_CMP, &ea2, &ea, size);
-			}
 			continue;
 		}
 		/* CMPA */
@@ -1689,13 +1474,6 @@ skip:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea.op_size = size;
-				ea2.op_size = size;
-				ea2.mode = 1; ea2.reg = i;
-				
-				comp->push_op (OP_CMPA, &ea, &ea2, size);
-			}
 			continue;
 		}
 		/* CMPM */
@@ -1714,9 +1492,6 @@ skip:
 			op.cmpm.dest_reg = ea.reg;
 			wr_short (op.code);
 			
-			if (output_c) {
-				error ("C code not generated (work unfinished).");
-			}
 			continue;
 		}
 		/* CMP */
@@ -1741,13 +1516,6 @@ skip:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea.op_size = size;
-				ea2.op_size = size;
-				ea2.mode = 0; ea2.reg = i;
-				
-				comp->push_op (OP_CMP, &ea, &ea2, size);
-			}
 			continue;
 		}
 		/* EXG */
@@ -1776,9 +1544,6 @@ skip:
 			check_end (pos);
 			wr_short (op.code);
 			
-			if (output_c) {
-				comp->push_op (OP_EXG, &ea, &ea2, LONG);
-			}
 			continue;
 		}
 		/* EXT */
@@ -1796,9 +1561,6 @@ skip:
 			op.type2.op_mode = size+1;
 			wr_short (op.code);
 			
-			if (output_c) {
-				comp->push_op (OP_EXT, &ea, NULL, size);
-			}
 			continue;
 		}
 			
@@ -1821,9 +1583,6 @@ skip:
 			check_end (&pos[3]);
 			wr_short (0x4e73);
 			
-			if (output_c) {
-				comp->push_op_basic (OP_RTE);
-			}
 			continue;
 		}
 		/* RTS */
@@ -1831,9 +1590,16 @@ skip:
 			check_end (&pos[3]);
 			wr_short (0x4e75);
 			
-			if (output_c) {
-				comp->push_op_basic (OP_RTS);
-			}
+			continue;
+		}
+		/* STOP */
+		if (strncmp (pos, "stop", 3) == 0) {
+			pos += 4;
+			check_whitespace();
+			pos = get_imm (pos, &imm, F_IMM | F_NOLABELS);
+			check_end (pos);
+			wr_short (0x4e72);
+			wr_short(imm.val);
 			continue;
 		}
 		/* ILLEGAL */
@@ -1841,9 +1607,6 @@ skip:
 			check_end (&pos[7]);
 			wr_short (0x4afc);
 			
-			if (output_c) {
-				comp->push_op_basic (OP_ILLEGAL);
-			}
 			continue;
 		}
 		/* HOSTCALL -- Not 68000 */
@@ -1856,10 +1619,6 @@ skip:
 			wr_short (0x000b);
 			wr_short (imm.val);
 			
-			if (output_c) {
-				ea.imm.val = imm.val;
-				comp->push_op (OP_HCALL, &ea, NULL, 0);
-			}
 			continue;
 		}
 		/* RESET */
@@ -1867,9 +1626,6 @@ skip:
 			check_end (&pos[5]);
 			wr_short (0x4e70);
 			
-			if (output_c) {
-				error ("C code not generated (work unfinished).");
-			}
 			continue;
 		}
 		/* TRAP */
@@ -1879,9 +1635,6 @@ skip:
 				check_end (&pos[5]);
 				wr_short (0x4e76);
 			
-				if (output_c) {
-					error ("C code not generated (work unfinished).");
-				}
 				continue;
 			}
 			pos += 4;
@@ -1893,9 +1646,6 @@ skip:
 			}
 			wr_short (0x4e40 | imm.val);
 			
-			if (output_c) {
-				error ("C code not generated (work unfinished).");
-			}
 			continue;
 		}
 		/* LINK */
@@ -1912,11 +1662,6 @@ skip:
 			wr_short (op.code);
 			wr_short (imm.val);
 			
-			if (output_c) {
-				ea.mode = 1; ea.reg = reg;
-				ea2.imm.val = imm.val;
-				comp->push_op (OP_LINK, &ea, &ea2, 0);
-			}
 			continue;
 		}
 		/* UNLK */
@@ -1929,10 +1674,6 @@ skip:
 			op.type1.ea_reg = reg;
 			wr_short (op.code);
 			
-			if (output_c) {
-				ea.mode = 1; ea.reg = reg;
-				comp->push_op (OP_UNLK, &ea, NULL, 0);
-			}
 			continue;
 		}
 		/* MOVEQ */
@@ -1949,10 +1690,6 @@ skip:
 			op.moveq.data = imm.val;
 			wr_short (op.code);
 
-			if (output_c) {
-				ea_set_immediate (&ea2, imm.val);
-				comp->push_op (OP_MOVE, &ea2, &ea, LONG);
-			}
 			continue;
 		}
 		/* MOVEA */
@@ -1976,10 +1713,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea2.mode = 1; ea2.reg = i;
-				comp->push_op (OP_MOVEA, &ea, &ea2, size);
-			}
 			continue;
 		}
 		/* MOVE */
@@ -1994,6 +1727,14 @@ is_movea:
 			check_end (pos);
 			
 			if ((ea.mode == 7) && (ea.reg == 1) && (ea.imm.has_label)) {
+				if (strcmp (ea.imm.label, "usp")==0) {
+					/* move usp to areg */
+					if (size != LONG) error ("Illegal size.");
+					if (ea2.mode != 1) error("Only address register destination");
+					op.code = 0x4E68 | ea2.reg;
+					wr_short (op.code);
+					continue;
+				}
 				if (strcmp (ea.imm.label, "sr")==0) {
 					/* move from sr */
 					if (size != WORD) error ("Illegal size.");
@@ -2003,9 +1744,6 @@ is_movea:
 					wr_short (op.code);
 					wr_ea (&ea2);
 			
-					if (output_c) {
-						error ("C code not generated (work unfinished).");
-					}
 					continue;
 				}
 			}
@@ -2014,18 +1752,24 @@ is_movea:
 				goto is_movea;
 			}
 			if ((ea2.mode == 7) && (ea2.reg == 1) && (ea2.imm.has_label)) {
-				if (strcmp (ea2.imm.label, "sr")==0) {
+				if (strcmp (ea2.imm.label, "sr")==0 ||
+				    strcmp (ea2.imm.label, "ccr")==0) {
 					/* move to status reg */
 					if (size != WORD) error ("Illegal size.");
-					op.code = 0x46c0;
+					op.code = ea2.imm.label[0] == 's' ? 0x46c0 : 0x44c0;
 					op.type1.ea_reg = ea.reg;
 					op.type1.ea_mode = ea.mode;
 					wr_short (op.code);
 					wr_ea (&ea);
 			
-					if (output_c) {
-						error ("C code not generated (work unfinished).");
-					}
+					continue;
+				}
+				if (strcmp (ea2.imm.label, "usp")==0) {
+					/* move areg to usp */
+					if (size != LONG) error ("Illegal size.");
+					if (ea.mode != 1) error("Only address register source");
+					op.code = 0x4E60 | ea.reg;
+					wr_short (op.code);
 					continue;
 				}
 			}
@@ -2039,9 +1783,6 @@ is_movea:
 			wr_ea (&ea);
 			wr_ea (&ea2);
 
-			if (output_c) {
-				comp->push_op (OP_MOVE, &ea, &ea2, size);
-			}
 			continue;
 		}
 		/* TST */
@@ -2059,10 +1800,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea.op_size = size;
-				comp->push_op (OP_TST, &ea, NULL, size);
-			}
 			continue;
 		}
 		/* PEA */
@@ -2077,10 +1814,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea.op_size = LONG;
-				comp->push_op (OP_PEA, &ea, NULL, LONG);
-			}
 			continue;
 		}
 		/* LEA */
@@ -2098,10 +1831,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				ea.op_size = LONG;
-				comp->push_op (OP_LEA, &ea, &ea2, LONG);
-			}
 			continue;
 		}
 
@@ -2118,9 +1847,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				comp->push_op (OP_JSR, &ea, NULL, 0);
-			}
 			continue;
 		}
 		/* JMP */
@@ -2136,9 +1862,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				comp->push_op (OP_JMP, &ea, NULL, 0);
-			}
 			continue;
 		}
 		/* TAS */
@@ -2153,9 +1876,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				error ("C code not generated (work unfinished).");
-			}
 			continue;
 		}
 		/* Scc */
@@ -2176,9 +1896,6 @@ is_movea:
 			wr_short (op.code);
 			wr_ea (&ea);
 			
-			if (output_c) {
-				comp->push_op2 (OP_SCC, &ea, NULL, BYTE, op.code);
-			}
 			continue;
 		}
 err:
@@ -2192,8 +1909,6 @@ err:
 	set_bitpos (size + BASE);
 	wr_int (0);
 	
-	if (output_c) comp->end (src_filename);
-
 	return size + BASE;
 }
 
@@ -2276,14 +1991,6 @@ int main (int argc, char **argv)
 		
 		if (strcmp (argv[arg], "--dump-labels") == 0) {
 			dump_labels = 1;
-		}
-		else if (strcmp (argv[arg], "--output-c") == 0) {
-			comp = &compiler[COMPILE_C];
-			output_c = 1;
-		}
-		else if (strcmp (argv[arg], "--output-i386") == 0) {
-			comp = &compiler[COMPILE_i386];
-			output_c = 1;
 		}
 		else {
 			fprintf (stderr, "Unknown option: '%s'\n", argv[arg]);

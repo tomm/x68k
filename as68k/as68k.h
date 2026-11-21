@@ -3,7 +3,7 @@
 
 typedef unsigned int uint;
 
-#define LAB_LEN	64
+#define LAB_LEN	128
 /* atari .prg binaries have header then code at 0x1c */
 #define BASE	0x1c
 
